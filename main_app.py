@@ -3,13 +3,17 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 
-# --- 1. 核心逻辑函数 ---
+# --- 1. 核心逻辑函数更新 ---
+@st.cache_data(ttl=3600)
 def get_valuation_data(ticker_symbol):
     ticker = yf.Ticker(ticker_symbol)
-    # 获取财务数据（加入缓存避免频繁请求）
+    info = ticker.info
+    
+    # 获取财务数据
     income_stmt = ticker.financials
     cash_flow = ticker.cashflow
     
+    # 提取基础指标
     rev = income_stmt.loc["Total Revenue"].iloc[:3]
     if "Free Cash Flow" in cash_flow.index:
         fcf = cash_flow.loc["Free Cash Flow"].iloc[:3]
@@ -18,56 +22,87 @@ def get_valuation_data(ticker_symbol):
     
     metrics = pd.DataFrame({"Revenue": rev, "FCF": fcf})
     metrics["Margin (%)"] = (metrics["FCF"] / metrics["Revenue"]) * 100
-    return metrics.sort_index(), fcf.iloc[0]
+    
+    # 获取股价和股本 (用于每股估值)
+    current_price = info.get("currentPrice")
+    shares_outstanding = info.get("sharesOutstanding")
+    
+    return metrics.sort_index(), fcf.iloc[0], current_price, shares_outstanding
+
+def calculate_dcf(fcf_m, g, r, tg):
+    """通用的 DCF 计算逻辑"""
+    pvs = [ (fcf_m * (1 + g)**t) / (1 + r)**t for t in range(1, 6) ]
+    tv = (fcf_m * (1 + g)**5 * (1 + tg)) / (r - tg)
+    pv_tv = tv / (1 + r)**5
+    return sum(pvs) + pv_tv
 
 # --- 2. Streamlit UI 布局 ---
-st.set_page_config(page_title="TEAM/TTD 估值工作台", layout="wide")
-st.title("🚀 量化分析利器：交互式 DCF 估值看板")
+st.set_page_config(page_title="量化估值工作台", layout="wide")
+st.title("🚀 成长股情景估值看板 (DCF)")
 
-# 侧边栏参数调节
 with st.sidebar:
-    st.header("模型参数设置")
+    st.header("模型核心参数")
     target_ticker = st.text_input("股票代码", value="TEAM").upper()
-    g_rate = st.slider("前 5 年增长率 (g)", 0.0, 0.50, 0.25)
-    r_rate = st.slider("折现率 (WACC/r)", 0.05, 0.20, 0.10)
+    g_base = st.slider("中性预期增长率 (g)", 0.0, 0.60, 0.25)
+    r_rate = st.slider("折现率 (WACC)", 0.05, 0.20, 0.10)
     terminal_g = st.slider("永续增长率", 0.0, 0.05, 0.03)
 
-# 获取数据
 try:
-    history_df, latest_fcf = get_valuation_data(target_ticker)
-    
-    # 计算 DCF
+    history_df, latest_fcf, cur_price, shares = get_valuation_data(target_ticker)
     fcf_m = latest_fcf / 1e6
-    pvs = [ (fcf_m * (1 + g_rate)**t) / (1 + r_rate)**t for t in range(1, 6) ]
-    tv = (fcf_m * (1 + g_rate)**5 * (1 + terminal_g)) / (r_rate - terminal_g)
-    pv_tv = tv / (1 + r_rate)**5
-    total_ev = sum(pvs) + pv_tv
+    shares_m = shares / 1e6
 
-    # --- 展示指标 ---
+    # --- 3. 情景分析计算 ---
+    scenarios = {
+        "悲观 (Pessimistic)": g_base - 0.05,
+        "中性 (Neutral)": g_base,
+        "乐观 (Optimistic)": g_base + 0.05
+    }
+    
+    results = []
+    for name, g in scenarios.items():
+        ev = calculate_dcf(fcf_m, g, r_rate, terminal_g)
+        fair_value = ev / shares_m
+        upside = (fair_value / cur_price - 1) * 100
+        results.append({
+            "情景": name,
+            "预期增长率": f"{g*100:.1f}%",
+            "内在价值 (每股)": f"${fair_value:.2f}",
+            "潜在涨幅": f"{upside:.1f}%"
+        })
+
+    # --- 4. 核心指标展示 ---
     col1, col2, col3 = st.columns(3)
-    col1.metric("最新 FCF (M)", f"${fcf_m:.2f}")
-    col2.metric("平均 FCF 利润率", f"{history_df['Margin (%)'].mean():.2f}%")
-    col3.metric("估值企业价值 (M)", f"${total_ev:.2f}")
+    col1.metric("当前市价", f"${cur_price:.2f}")
+    col2.metric("最新 FCF (M)", f"${fcf_m:.2f}")
+    col3.metric("总股本 (M)", f"{shares_m:.2f}")
 
-    # --- Plotly 瀑布图 ---
+    st.divider()
+
+    # --- 5. 展示情景对比表 ---
+    st.subheader("📊 多情景估值对比")
+    res_df = pd.DataFrame(results)
+    
+    # 使用 st.dataframe 配合颜色高亮
+    def highlight_upside(val):
+        color = 'red' if '-' in val else 'green'
+        return f'color: {color}'
+    
+    st.table(res_df)
+
+    # --- 6. 瀑布图 (基于中性预期) ---
+    st.subheader(f"🎯 中性情景下的估值构成 ({g_base*100:.0f}% 增长)")
+    pvs = [ (fcf_m * (1 + g_base)**t) / (1 + r_rate)**t for t in range(1, 6) ]
+    pv_tv = (calculate_dcf(fcf_m, g_base, r_rate, terminal_g) - sum(pvs))
+    
     fig = go.Figure(go.Waterfall(
-        name = "DCF Components", orientation = "v",
+        orientation = "v",
         measure = ["relative"] * 6 + ["total"],
-        x = ["Year 1 PV", "Year 2 PV", "Year 3 PV", "Year 4 PV", "Year 5 PV", "Terminal Value PV", "Intrinsic Value"],
-        textposition = "outside",
-        text = [f"${v:.1f}" for v in pvs] + [f"${pv_tv:.1f}", f"${total_ev:.1f}"],
-        y = pvs + [pv_tv, 0], # 最后一个设为0因为是total
-        connector = {"line":{"color":"rgb(63, 63, 63)"}},
-        increasing = {"marker":{"color":"#1f77b4"}},
+        x = ["Year 1 PV", "Year 2 PV", "Year 3 PV", "Year 4 PV", "Year 5 PV", "Terminal Value PV", "Intrinsic EV"],
+        y = pvs + [pv_tv, 0],
         totals = {"marker":{"color":"#2ca02c"}}
     ))
-
-    fig.update_layout(title=f"{target_ticker} 估值构成瀑布图", showlegend=False)
     st.plotly_chart(fig, use_container_width=True)
 
-    # 展示历史利润率
-    st.subheader("历史财务数据趋势")
-    st.line_chart(history_df['Margin (%)'])
-
 except Exception as e:
-    st.error(f"无法加载数据，请检查代码或网络: {e}")
+    st.error(f"数据处理异常: {e}")
