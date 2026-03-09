@@ -3,117 +3,118 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 
-# --- 1. 核心逻辑函数：增加 SBC 提取 ---
+# --- 1. 核心数据抓取 ---
 @st.cache_data(ttl=3600)
 def get_full_financial_data(ticker_symbol):
     ticker = yf.Ticker(ticker_symbol)
     info = ticker.info
     
-    # 财务报表
-    income_stmt = ticker.financials
+    # 获取财务报表
     cash_flow = ticker.cashflow
-    q_income = ticker.quarterly_financials
-    q_balance = ticker.quarterly_balance_sheet
-    q_cash = ticker.quarterly_cashflow
+    income_stmt = ticker.financials
     
-    # --- SBC 处理逻辑 ---
-    # 尝试从现金流量表中提取 Stock Based Compensation
-    if "Stock Based Compensation" in cash_flow.index:
-        sbc_series = cash_flow.loc["Stock Based Compensation"]
-    else:
-        # 如果 yfinance 字段名不一致，尝试匹配
-        sbc_series = pd.Series(0, index=cash_flow.columns)
+    # 提取 SBC (Stock Based Compensation)
+    sbc_series = cash_flow.loc["Stock Based Compensation"] if "Stock Based Compensation" in cash_flow.index else pd.Series(0, index=cash_flow.columns)
     
-    # --- FCF 计算与调整 ---
+    # 提取原始 FCF
     if "Free Cash Flow" in cash_flow.index:
-        fcf_raw = cash_flow.loc["Free Cash Flow"]
+        fcf_raw_series = cash_flow.loc["Free Cash Flow"]
     else:
-        ocf = cash_flow.loc["Operating Cash Flow"]
-        capex = cash_flow.loc["Capital Expenditures"]
-        fcf_raw = ocf + capex 
+        fcf_raw_series = cash_flow.loc["Operating Cash Flow"] + cash_flow.loc["Capital Expenditures"]
     
-    # 核心：计算 Adjusted FCF (去水分现金流)
-    adj_fcf_series = fcf_raw - sbc_series
-    
-    # 提取最新数据
-    latest_adj_fcf = adj_fcf_series.iloc[0]
+    # 计算最新数据
+    latest_fcf_raw = fcf_raw_series.iloc[0]
     latest_sbc = sbc_series.iloc[0]
     
-    # 资产负债表项
-    total_cash = info.get("totalCash", 0)
-    total_debt = info.get("totalDebt", 0)
-    net_debt = total_debt - total_cash
-    
-    current_price = info.get("currentPrice")
-    shares_outstanding = info.get("sharesOutstanding")
-    
     return {
-        "latest_adj_fcf": latest_adj_fcf,
-        "latest_sbc": latest_sbc,
-        "fcf_raw": fcf_raw.iloc[0],
-        "current_price": current_price,
-        "shares": shares_outstanding,
-        "net_debt": net_debt,
-        "total_cash": total_cash,
-        "total_debt": total_debt,
-        "q_income": q_income,
-        "q_balance": q_balance,
-        "q_cash": q_cash
+        "fcf_raw": latest_fcf_raw,
+        "sbc": latest_sbc,
+        "current_price": info.get("currentPrice"),
+        "shares": info.get("sharesOutstanding"),
+        "net_debt": (info.get("totalDebt", 0) - info.get("totalCash", 0)),
+        "q_income": ticker.quarterly_financials,
+        "q_balance": ticker.quarterly_balance_sheet,
+        "q_cash": ticker.quarterly_cashflow
     }
 
-def calculate_intrinsic_value(adj_fcf_m, g, r, tg, net_debt_m, shares_m):
-    pvs = [ (adj_fcf_m * (1 + g)**t) / (1 + r)**t for t in range(1, 6) ]
-    tv = (adj_fcf_m * (1 + g)**5 * (1 + tg)) / (r - tg)
+def calculate_dcf(fcf_m, g, r, tg, net_debt_m, shares_m):
+    pvs = [ (fcf_m * (1 + g)**t) / (1 + r)**t for t in range(1, 6) ]
+    tv = (fcf_m * (1 + g)**5 * (1 + tg)) / (r - tg)
     pv_tv = tv / (1 + r)**5
-    ev = sum(pvs) + pv_tv
-    equity_value = ev - net_debt_m
-    return equity_value / shares_m, ev, pv_tv
+    equity_value = (sum(pvs) + pv_tv) - net_debt_m
+    return equity_value / shares_m
 
-# --- 2. Streamlit UI 布局 ---
-st.set_page_config(page_title="SBC 调整后精准估值", layout="wide")
-st.title("⚖️ 精准估值：SBC 调整后 DCF 模型")
+# --- 2. Streamlit UI ---
+st.set_page_config(page_title="SBC 敏感度估值工具", layout="wide")
+st.title("⚖️ 估值分歧：SBC 敏感度分析看板")
 
+# 侧边栏
 with st.sidebar:
-    st.header("模型核心参数")
+    st.header("1. 输入参数")
     target_ticker = st.text_input("股票代码", value="TEAM").upper()
-    g_base = st.number_input("中性预期增长率 (g)", value=0.250, step=0.005, format="%.3f")
+    
+    st.divider()
+    st.header("2. 估值口径切换")
+    # 核心功能：勾选框
+    deduct_sbc = st.checkbox("扣除 SBC 影响 (更保守/真实)", value=True)
+    
+    st.divider()
+    st.header("3. 模型假设")
+    g_base = st.number_input("预期增长率 (g)", value=0.250, step=0.005, format="%.3f")
     r_rate = st.number_input("折现率 (WACC)", value=0.100, step=0.005, format="%.3f")
     terminal_g = st.number_input("永续增长率 (tg)", value=0.030, step=0.001, format="%.3f")
 
 try:
     data = get_full_financial_data(target_ticker)
     
-    adj_fcf_m = data["latest_adj_fcf"] / 1e6
-    sbc_m = data["latest_sbc"] / 1e6
+    # 单位换算为 Millions
     raw_fcf_m = data["fcf_raw"] / 1e6
+    sbc_m = data["sbc"] / 1e6
     shares_m = data["shares"] / 1e6
     net_debt_m = data["net_debt"] / 1e6
     cur_price = data["current_price"]
 
-    # --- 3. 现金流质量审计面板 ---
-    st.subheader("🔍 现金流质量审计 (Cash Flow Quality)")
-    q1, q2, q3 = st.columns(3)
-    q1.metric("原始 FCF (M)", f"${raw_fcf_m:.1f}M")
-    q2.metric("SBC 支出 (M)", f"- ${sbc_m:.1f}M")
-    sbc_ratio = (sbc_m / raw_fcf_m * 100) if raw_fcf_m != 0 else 0
-    q3.metric("调整后 FCF (M)", f"${adj_fcf_m:.1f}M", delta=f"SBC 占比 {sbc_ratio:.1f}%", delta_color="inverse")
+    # 决定使用的 FCF 口径
+    final_fcf_m = (raw_fcf_m - sbc_m) if deduct_sbc else raw_fcf_m
+    mode_text = "已扣除 SBC" if deduct_sbc else "未扣除 SBC (原始)"
 
-    # --- 4. 情景分析 (基于调整后的 FCF) ---
+    # --- 3. 核心指标展示 ---
+    st.subheader(f"🔍 现金流对比 ({mode_text})")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("原始 FCF (M)", f"${raw_fcf_m:.1f}M")
+    c2.metric("SBC 支出 (M)", f"- ${sbc_m:.1f}M", delta="稀释风险", delta_color="inverse")
+    c3.metric("最终计算用 FCF", f"${final_fcf_m:.1f}M", border=True)
+
+    # --- 4. 情景分析对比表 ---
     st.divider()
-    st.subheader(f"📊 {target_ticker} 股权价值情景分析 (已扣除 SBC)")
-    scenarios = {"悲观 (g-5%)": g_base - 0.05, "中性": g_base, "乐观 (g+5%)": g_base + 0.05}
-    results = []
+    st.subheader(f"📊 {target_ticker} 内在价值推演")
+    
+    scenarios = {"悲观": g_base - 0.05, "中性": g_base, "乐观": g_base + 0.05}
+    comparison_results = []
+    
     for name, g in scenarios.items():
-        fair_v, _, _ = calculate_intrinsic_value(adj_fcf_m, g, r_rate, terminal_g, net_debt_m, shares_m)
-        results.append({"情景": name, "增长率": f"{g*100:.1f}%", "内在价值": f"${fair_v:.2f}", "安全边际/涨幅": f"{(fair_v/cur_price-1)*100:.1f}%"})
-    st.table(pd.DataFrame(results))
+        # 当前口径下的估值
+        val_current = calculate_dcf(final_fcf_m, g, r_rate, terminal_g, net_debt_m, shares_m)
+        # 另一种口径作为参考
+        alt_fcf = raw_fcf_m if deduct_sbc else (raw_fcf_m - sbc_m)
+        val_alt = calculate_dcf(alt_fcf, g, r_rate, terminal_g, net_debt_m, shares_m)
+        
+        comparison_results.append({
+            "情景": name,
+            "预期增速": f"{g*100:.1f}%",
+            "当前口径估值": f"${val_current:.2f}",
+            "另一种口径参考": f"${val_alt:.2f}",
+            "当前涨跌幅": f"{(val_current/cur_price-1)*100:.1f}%"
+        })
+    
+    st.table(pd.DataFrame(comparison_results))
 
-    # --- 5. 财务报表审计 ---
-    st.subheader("📋 季度报表审计")
-    tab1, tab2, tab3 = st.tabs(["利润表", "资产负债表", "现金流量表"])
-    with tab1: st.dataframe(data["q_income"])
-    with tab2: st.dataframe(data["q_balance"])
-    with tab3: st.dataframe(data["q_cash"])
+    # --- 5. 报表展示 ---
+    with st.expander("查看原始财务报表 (季度)"):
+        t1, t2, t3 = st.tabs(["利润表", "资产负债表", "现金流量表"])
+        t1.dataframe(data["q_income"])
+        t2.dataframe(data["q_balance"])
+        t3.dataframe(data["q_cash"])
 
 except Exception as e:
-    st.error(f"模型运行出错：{e}")
+    st.error(f"模型加载失败，请检查 Ticker 是否正确: {e}")
