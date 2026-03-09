@@ -2,51 +2,61 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
 
-# --- 1. 数据抓取增强 ---
+# --- 1. 核心逻辑函数更新 ---
 @st.cache_data(ttl=3600)
 def get_full_financial_data(ticker_symbol):
     ticker = yf.Ticker(ticker_symbol)
     info = ticker.info
     
-    # 获取财务报表
+    # 财务报表
     income_stmt = ticker.financials
     cash_flow = ticker.cashflow
     q_income = ticker.quarterly_financials
     q_balance = ticker.quarterly_balance_sheet
     q_cash = ticker.quarterly_cashflow
     
-    # 计算季度收入增长 (YoY)
-    # yfinance 的季度数据通常按时间倒序排列，我们需要计算 (T / T-4) - 1
-    rev_q = q_income.loc["Total Revenue"].sort_index()
-    rev_growth_yoy = rev_q.pct_change(periods=4) * 100 
-    
-    growth_df = pd.DataFrame({
-        "Revenue (M)": rev_q / 1e6,
-        "YoY Growth (%)": rev_growth_yoy
-    }).dropna()
-
-    # 基础估值指标
+    # 提取基础指标
     if "Free Cash Flow" in cash_flow.index:
         fcf = cash_flow.loc["Free Cash Flow"].iloc[:3]
     else:
         fcf = (cash_flow.loc["Operating Cash Flow"] + cash_flow.loc["Capital Expenditures"]).iloc[:3]
     
+    # 提取净债务相关数据 (从 info 获取最新数据)
+    total_cash = info.get("totalCash", 0)
+    total_debt = info.get("totalDebt", 0)
+    net_debt = total_debt - total_cash
+    
+    current_price = info.get("currentPrice")
+    shares_outstanding = info.get("sharesOutstanding")
+    
     return {
         "latest_fcf": fcf.iloc[0],
-        "current_price": info.get("currentPrice"),
-        "shares": info.get("sharesOutstanding"),
+        "current_price": current_price,
+        "shares": shares_outstanding,
+        "net_debt": net_debt,
+        "total_cash": total_cash,
+        "total_debt": total_debt,
         "q_income": q_income,
         "q_balance": q_balance,
         "q_cash": q_cash,
-        "growth_trend": growth_df,
-        "margin": (fcf.iloc[0] / income_stmt.loc["Total Revenue"].iloc[0]) * 100
+        "fcf_history": fcf
     }
 
-# --- 2. 页面布局 ---
-st.set_page_config(page_title="精准量化看板", layout="wide")
-st.title("📈 财务趋势与 DCF 深度分析")
+def calculate_intrinsic_value(fcf_m, g, r, tg, net_debt_m, shares_m):
+    # 计算企业价值 (EV)
+    pvs = [ (fcf_m * (1 + g)**t) / (1 + r)**t for t in range(1, 6) ]
+    tv = (fcf_m * (1 + g)**5 * (1 + tg)) / (r - tg)
+    pv_tv = tv / (1 + r)**5
+    ev = sum(pvs) + pv_tv
+    
+    # EV -> Equity Value
+    equity_value = ev - net_debt_m
+    return equity_value / shares_m, ev, pv_tv
+
+# --- 2. Streamlit UI 布局 ---
+st.set_page_config(page_title="精准量化估值工作台", layout="wide")
+st.title("⚖️ 专业级 DCF 估值看板 (含净债务调整)")
 
 with st.sidebar:
     st.header("精准参数输入")
@@ -57,47 +67,32 @@ with st.sidebar:
 
 try:
     data = get_full_financial_data(target_ticker)
-    
-    # --- 3. 新增：季度收入增长曲线 ---
-    st.subheader("🚀 收入增长动能分析")
-    
-    fig_growth = go.Figure()
-    # 柱状图展示收入绝对值
-    fig_growth.add_trace(go.Bar(
-        x=data["growth_trend"].index,
-        y=data["growth_trend"]["Revenue (M)"],
-        name="Revenue (M)",
-        marker_color='rgba(31, 119, 180, 0.6)',
-        yaxis="y"
-    ))
-    # 折线图展示同比增长率
-    fig_growth.add_trace(go.Scatter(
-        x=data["growth_trend"].index,
-        y=data["growth_trend"]["YoY Growth (%)"],
-        name="YoY Growth (%)",
-        line=dict(color='#ff7f0e', width=3),
-        yaxis="y2"
-    ))
+    fcf_m = data["latest_fcf"] / 1e6
+    shares_m = data["shares"] / 1e6
+    net_debt_m = data["net_debt"] / 1e6
+    cur_price = data["current_price"]
 
-    fig_growth.update_layout(
-        hovermode="x unified",
-        yaxis=dict(title="Revenue (Millions)"),
-        yaxis2=dict(title="YoY Growth (%)", overlaying="y", side="right"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-    )
-    st.plotly_chart(fig_growth, use_container_width=True)
+    # --- 3. 核心指标展示 ---
+    st.subheader("🏦 资产负债表核心项 (Millions)")
+    m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+    m_col1.metric("现金储备", f"${data['total_cash']/1e6:.1f}M")
+    m_col2.metric("总债务", f"${data['total_debt']/1e6:.1f}M")
+    m_col3.metric("净债务 (Net Debt)", f"${net_debt_m:.1f}M", delta=f"债务缺口" if net_debt_m > 0 else "净现金", delta_color="inverse")
+    m_col4.metric("当前市价", f"${cur_price:.2f}")
 
-    # --- 4. 估值核心指标展示 ---
+    # --- 4. 情景分析 ---
+    scenarios = {"悲观": g_base - 0.05, "中性": g_base, "乐观": g_base + 0.05}
+    results = []
+    for name, g in scenarios.items():
+        fair_v, _, _ = calculate_intrinsic_value(fcf_m, g, r_rate, terminal_g, net_debt_m, shares_m)
+        results.append({"情景": name, "增长率": f"{g*100:.1f}%", "内在价值": f"${fair_v:.2f}", "涨跌幅": f"{(fair_v/cur_price-1)*100:.1f}%"})
+
     st.divider()
-    res_val = (data["latest_fcf"] / 1e6 * (1+g_base)) / (r_rate - terminal_g) # 简化展示用
-    
-    c1, c2, c3 = st.columns(3)
-    c1.metric("当前市价", f"${data['current_price']:.2f}")
-    c2.metric("最新 FCF 利润率", f"{data['margin']:.2f}%")
-    c3.metric("季度平均增速", f"{data['growth_trend']['YoY Growth (%)'].mean():.1f}%")
+    st.subheader("📊 股权价值情景分析")
+    st.table(pd.DataFrame(results))
 
-    # --- 5. 财务审计中心 (Tabs) ---
-    st.subheader("📋 季度原始报表审计")
+    # --- 5. 财务审计中心 ---
+    st.subheader("📋 季度财务审计中心")
     tab1, tab2, tab3 = st.tabs(["利润表", "资产负债表", "现金流量表"])
     with tab1: st.dataframe(data["q_income"])
     with tab2: st.dataframe(data["q_balance"])
