@@ -37,14 +37,14 @@ def calculate_dcf(fcf_m, g, r, tg):
     return sum(pvs) + pv_tv
 
 # --- 2. Streamlit UI 布局 ---
-st.set_page_config(page_title="量化估值工作台", layout="wide")
-st.title("🚀 成长股情景估值看板 (DCF)")
+st.set_page_config(page_title="Workbench", layout="wide")
+st.title("DCF")
 
 with st.sidebar:
-    st.header("模型核心参数")
+    st.header("Main Parameters")
     target_ticker = st.text_input("股票代码", value="TEAM").upper()
     g_base = st.slider("中性预期增长率 (g)", 0.0, 0.60, 0.25)
-    r_rate = st.slider("折现率 (WACC)", 0.05, 0.20, 0.10)
+    r_rate = st.slider("折现率 (WACC)", 0.05, 0.20, 0.1)
     terminal_g = st.slider("永续增长率", 0.0, 0.05, 0.03)
 
 try:
@@ -80,7 +80,7 @@ try:
     st.divider()
 
     # --- 5. 展示情景对比表 ---
-    st.subheader("📊 多情景估值对比")
+    st.subheader("Comparison")
     res_df = pd.DataFrame(results)
     
     # 使用 st.dataframe 配合颜色高亮
@@ -91,7 +91,7 @@ try:
     st.table(res_df)
 
     # --- 6. 瀑布图 (基于中性预期) ---
-    st.subheader(f"🎯 中性情景下的估值构成 ({g_base*100:.0f}% 增长)")
+    st.subheader(f"Valuation ({g_base*100:.0f}% 增长)")
     pvs = [ (fcf_m * (1 + g_base)**t) / (1 + r_rate)**t for t in range(1, 6) ]
     pv_tv = (calculate_dcf(fcf_m, g_base, r_rate, terminal_g) - sum(pvs))
     
