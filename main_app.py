@@ -326,15 +326,15 @@ def run_dcf_fcff(
 # -----------------------------
 # Streamlit UI
 # -----------------------------
-st.set_page_config(page_title="自动化硬核估值台", layout="wide")
-st.title("⚖️ 自动化 WACC & 动态股本 FCFF-DCF 模型（自洽版）")
+st.set_page_config(page_title="DCF Model", layout="wide")
+st.title("FCFF-DCF Model")
 
 with st.sidebar:
-    st.header("1. 目标选择")
-    ticker_input = st.text_input("股票代码", value="TEAM").upper().strip()
+    st.header("1. Symbol")
+    ticker_input = st.text_input("Ticker", value="TEAM").upper().strip()
 
     st.divider()
-    st.header("2. WACC 自动计算器")
+    st.header("2. WACC Calc")
     erp = st.number_input("股权风险溢价 (ERP %)", value=5.5, step=0.1) / 100
     tax_rate = st.number_input("企业所得税率 (%)", value=21.0, step=1.0) / 100
 
@@ -354,7 +354,7 @@ with st.sidebar:
     )
 
     st.divider()
-    st.header("4. 估值核心假设")
+    st.header("4. Assumption")
     g_base = st.number_input("中性增长率 (g)", value=0.200, step=0.005, format="%.3f")
     terminal_g = st.number_input("永续增长率 (tg)", value=0.030, step=0.001, format="%.3f")
 
