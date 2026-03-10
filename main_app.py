@@ -429,7 +429,7 @@ try:
     shares_m = data["shares"] / 1e6
 
     # --- Audit panel ---
-    st.subheader("📊 自动化参数审计（关键口径已自洽：FCFF + WACC）")
+    st.subheader("Parameters")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("无风险利率 (10Y)", f"{data['rf_rate']*100:.2f}%")
     c2.metric("Beta", f"{data['beta']:.2f}")
@@ -455,7 +455,7 @@ try:
 
     # --- DCF scenarios ---
     st.divider()
-    st.subheader("🧮 5年显性期 + 永续终值：情景估值（每股内在价值）")
+    st.subheader("intrinsic")
 
     scenarios = {
         "悲观 (g-5%)": g_base - 0.05,
@@ -502,7 +502,7 @@ try:
 
     # --- Optional: sensitivity surface (g x WACC) ---
     st.divider()
-    st.subheader("📈 敏感性分析（g × WACC）")
+    st.subheader("Sensitivity Analysis（g × WACC）")
 
     g_grid = np.array([g_base - 0.06, g_base - 0.03, g_base, g_base + 0.03, g_base + 0.06])
     w_grid = np.array([final_wacc - 0.02, final_wacc - 0.01, final_wacc, final_wacc + 0.01, final_wacc + 0.02])
